@@ -14,6 +14,6 @@ brew "eza"                        # Modern ls with icons and git status
 brew "bat"                        # cat with syntax highlighting
 brew "ripgrep"                    # Very fast grep (rg)
 brew "fd"                         # Friendly find
-brew "tldr"                       # Short, practical man pages
+brew "tlrc"                       # tldr pages: short, practical command examples
 brew "mas"                        # Mac App Store CLI (used by sync)
 cask "font-jetbrains-mono-nerd-font" # Font with icons for the prompt

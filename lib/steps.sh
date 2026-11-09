@@ -63,7 +63,7 @@ step_homebrew() {
     printf '\neval "$(%s/bin/brew shellenv)"\n' "$(brew --prefix)" >> "$HOME/.zprofile"
     ok "Added Homebrew to ~/.zprofile"
   fi
-  info "Updating Homebrew…"; brew update --quiet || true
+  run_task "Updating Homebrew" brew update --quiet || true
   mark_done homebrew
 }
 
@@ -78,52 +78,232 @@ item_desc()   { printf '%s' "$1" | sed -nE 's/.*# *(.*)$/\1/p'; }
 step_apps() {
   header "Apps & packages"
   need_brew || return 1
-  local f title tmp items i line skip n chosen any=0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/brewfile.XXXXXX")"
-  : > "$tmp"
+  local f title items i line skip n chosen
+  SELECTED=()
+
+  # ── 1. Choose ────────────────────────────────────────────────────────
   for f in "$REPO_DIR"/brew/*.Brewfile; do
     [ -f "$f" ] || continue
     title="$(group_title "$f")"; [ -z "$title" ] && title="$(basename "$f" .Brewfile)"
     items=()
     while IFS= read -r line; do items+=("$line"); done < <(group_items "$f")
     [ ${#items[@]} -eq 0 ] && continue
-    echo
-    printf '%s%s%s  %s(%s)%s\n' "$BOLD" "$title" "$RESET" "$DIM" "$(basename "$f")" "$RESET"
-    for i in "${!items[@]}"; do
-      line="${items[$i]}"
-      printf '  %2d) %-28s %s%s%s\n' "$((i+1))" "$(item_name "$line")" "$DIM" "$(item_desc "$line")" "$RESET"
-    done
     if [ "$ASSUME_YES" = "1" ]; then
       skip=""
     else
+      echo
+      printf '%s%s%s  %s(%s)%s\n' "$BOLD" "$title" "$RESET" "$DIM" "$(basename "$f")" "$RESET"
+      for i in "${!items[@]}"; do
+        line="${items[$i]}"
+        printf '  %2d) %-30s %s%s%s\n' "$((i+1))" "$(item_name "$line")" "$DIM" "$(item_desc "$line")" "$RESET"
+      done
       printf '%s?%s Enter = install all · numbers to SKIP (e.g. "3 7") · "n" = skip group: ' "$CYAN" "$RESET"
       IFS= read -r skip || skip=""
     fi
-    case "$skip" in [Nn]|[Nn][Oo]|none) note "Skipped group."; continue ;; esac
+    case "$skip" in [Nn]|[Nn][Oo]|none) note "Skipped $title"; continue ;; esac
     skip=" $(printf '%s' "$skip" | tr ',' ' ') "
-    # keep taps from the file, then chosen items
-    grep -E '^tap ' "$f" >> "$tmp" || true
     chosen=0
     for i in "${!items[@]}"; do
       n=$((i+1))
       case "$skip" in *" $n "*) continue ;; esac
-      printf '%s\n' "${items[$i]}" >> "$tmp"; chosen=$((chosen+1)); any=1
+      SELECTED+=("${items[$i]}"); chosen=$((chosen+1))
     done
-    ok "$chosen selected from \"$title\""
+    ok "$title ${DIM}($chosen)${RESET}"
   done
 
-  if [ $any -eq 1 ]; then
-    echo
-    info "Installing with brew bundle (already-installed items are skipped)…"
-    note "Some apps may ask for your Mac password."
-    if brew bundle --file="$tmp"; then ok "All selected apps installed."
-    else warn "Some items failed — scroll up for details. You can re-run this step any time."; fi
-  else
-    note "Nothing selected."
-  fi
-  rm -f "$tmp"
+  if [ ${#SELECTED[@]} -eq 0 ]; then note "Nothing selected."; run_extra_installs; mark_done apps; return 0; fi
+
+  # ── 2. Install, one by one, with a live progress bar ────────────────
+  local rc=0
+  install_selected || rc=1
   run_extra_installs
-  mark_done apps
+  [ $rc -eq 0 ] && mark_done apps
+  return $rc
+}
+
+# What's already on this Mac (cached once per run)
+snapshot_installed() {   # writes into $INSTALLED_DIR (created by the caller)
+  brew list --formula -1 > "$INSTALLED_DIR/brew" 2>/dev/null
+  brew list --cask -1    > "$INSTALLED_DIR/cask" 2>/dev/null
+  if have code; then code --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' > "$INSTALLED_DIR/vscode"; else : > "$INSTALLED_DIR/vscode"; fi
+  if have mas; then mas list 2>/dev/null | awk '{print $1}' > "$INSTALLED_DIR/mas"; else : > "$INSTALLED_DIR/mas"; fi
+}
+
+item_mas_id() { printf '%s' "$1" | sed -nE 's/.*id: *([0-9]+).*/\1/p'; }
+
+is_installed() {  # kind name line
+  case "$1" in
+    brew)   grep -qxF "$2" "$INSTALLED_DIR/brew" || grep -qxF "${2##*/}" "$INSTALLED_DIR/brew" ;;
+    cask)   grep -qxF "$2" "$INSTALLED_DIR/cask" || grep -qxF "${2##*/}" "$INSTALLED_DIR/cask" ;;
+    vscode) grep -qxF "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" "$INSTALLED_DIR/vscode" ;;
+    mas)    grep -qxF "$(item_mas_id "$3")" "$INSTALLED_DIR/mas" ;;
+    *) return 1 ;;
+  esac
+}
+
+install_cmd() {  # kind name line [adopt]  -> runs the install
+  case "$1" in
+    brew)   brew install "$2" ;;
+    cask)   if [ "${4:-}" = adopt ]; then brew install --cask --adopt "$2"; else brew install --cask "$2"; fi ;;
+    vscode) code --install-extension "$2" --force ;;
+    mas)    mas install "$(item_mas_id "$3")" ;;
+  esac
+}
+
+# Short human reason from a brew log
+failure_reason() {
+  local r
+  r="$(grep -m1 -E '^TIMEOUT:|^Error:|error:|It seems there is already|requires macOS|No available (formula|cask)|Download failed|SHA256 mismatch' "$1" 2>/dev/null | sed -E 's/^Error: //; s/^[[:space:]]+//')"
+  [ -z "$r" ] && r="$(grep -v '^\s*$' "$1" | tail -1)"
+  printf '%s' "$r" | cut -c1-110
+}
+
+# Download everything that's missing, PARALLEL_DOWNLOADS at a time (installs stay one-by-one,
+# because Homebrew can't run two installs at once — but downloads are the slow part).
+PARALLEL_DOWNLOADS="${PARALLEL_DOWNLOADS:-4}"
+prefetch_missing() {
+  local queue=("$@") total=$# next=0 done_n=0 fail_n=0 i=0 start=$SECONDS
+  local pids=() names=() k alive kind name line active marker opened=0
+  [ "$total" -eq 0 ] && return 0
+  PREFETCH_STOP=0
+  mkdir -p "$LOG_DIR"; rm -f "$LOG_DIR"/fetch-*.log
+  marker="$LOG_DIR/.prefetch.running"; : > "$marker"
+  trap 'PREFETCH_STOP=1; for k in "${pids[@]}"; do [ -n "$k" ] && kill "$k" 2>/dev/null; done' INT
+  mkdir -p "$LOG_DIR"
+  cursor_hide
+  while [ $done_n -lt "$total" ] && [ $PREFETCH_STOP -eq 0 ]; do
+    # fill free slots
+    alive=0; for k in "${pids[@]}"; do [ -n "$k" ] && alive=$((alive+1)); done
+    while [ $alive -lt "$PARALLEL_DOWNLOADS" ] && [ $next -lt "$total" ]; do
+      line="${queue[$next]}"; kind="$(item_kind "$line")"; name="$(item_name "$line")"
+      if [ "$kind" = cask ]; then brew fetch --cask "$name" > "$LOG_DIR/fetch-$name.log" 2>&1 < /dev/null &
+      else brew fetch --deps "$name" > "$LOG_DIR/fetch-$name.log" 2>&1 < /dev/null & fi
+      pids[$next]=$!; names[$next]="$name"; next=$((next+1)); alive=$((alive+1))
+    done
+    # reap finished ones
+    for k in "${!pids[@]}"; do
+      [ -z "${pids[$k]}" ] && continue
+      if ! kill -0 "${pids[$k]}" 2>/dev/null; then
+        if wait "${pids[$k]}"; then
+          printf '\r\033[K  %s↓%s %-30s %sdownloaded%s\n' "$GREEN" "$RESET" "${names[$k]}" "$DIM" "$RESET"
+        else
+          fail_n=$((fail_n+1))
+          printf '\r\033[K  %s↓%s %-30s %sdownload failed — will retry during install%s\n' "$YELLOW" "$RESET" "${names[$k]}" "$DIM" "$RESET"
+        fi
+        pids[$k]=""; done_n=$((done_n+1))
+      fi
+    done
+    # long-running? open a live log window that follows all downloads
+    if [ $opened -eq 0 ] && [ "$LOG_WINDOW_AFTER" -gt 0 ] && [ $((SECONDS - start)) -ge "$LOG_WINDOW_AFTER" ]; then
+      opened=1; open_log_window "Downloads" "$marker" "$LOG_DIR"/fetch-*.log
+    fi
+    # status line
+    active=""; for k in "${!pids[@]}"; do [ -n "${pids[$k]}" ] && active="$active${names[$k]}, "; done
+    if animated; then
+      printf '\r\033[K  %s%s%s %s %d/%d  %sdownloading %s%s %s%s%s' "$CYAN" "${SPIN_FRAMES[$((i % 10))]}" "$RESET" \
+        "$(progress_bar "$done_n" "$total" 20)" "$done_n" "$total" "$DIM" "${active%, }" "$RESET" "$DIM" "$(fmt_secs $((SECONDS - start)))" "$RESET"
+    fi
+    i=$((i+1)); sleep 0.1
+  done
+  printf '\r\033[K'; cursor_show; rm -f "$marker"
+  trap 'cleanup_ui; echo; warn "Stopped. Run ./setup.sh again to continue where you left off."; exit 130' INT
+  if [ $PREFETCH_STOP -eq 1 ]; then
+    warn "Downloads stopped — continuing with installs."
+  else
+    ok "Downloaded $((total - fail_n))/$total in $(fmt_secs $((SECONDS - start))) ${DIM}($PARALLEL_DOWNLOADS at a time)${RESET}"
+  fi
+  return 0
+}
+
+install_selected() {
+  local total=${#SELECTED[@]} idx=0 line kind name pid rc start t0=$SECONDS
+  local n_new=0 n_had=0 n_fail=0 n_skip=0 has_cask=0 reason
+  FAILED_ITEMS=(); SKIPPED_ITEMS=()
+
+  for line in "${SELECTED[@]}"; do [ "$(item_kind "$line")" = cask ] && has_cask=1; done
+  echo
+  [ $has_cask -eq 1 ] && sudo_keepalive
+  export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+  run_task "Updating Homebrew" brew update --quiet
+  INSTALLED_DIR="$(mktemp -d)"
+  run_task "Checking what's already installed" snapshot_installed
+  echo
+  # Parallel download phase
+  local missing=() l
+  for l in "${SELECTED[@]}"; do
+    case "$(item_kind "$l")" in brew|cask) is_installed "$(item_kind "$l")" "$(item_name "$l")" "$l" || missing+=("$l") ;; esac
+  done
+  if [ ${#missing[@]} -gt 1 ]; then
+    info "Downloading ${#missing[@]} apps in parallel (${PARALLEL_DOWNLOADS} at a time)…"
+    prefetch_missing "${missing[@]}"
+    echo
+  fi
+  info "Installing…"
+  note "Tip: press Ctrl+C to skip the app that's installing right now."
+  echo
+  # Ctrl+C during an install skips just that app
+  ITEM_PID=""; ITEM_SKIPPED=0
+  trap 'if [ -n "$ITEM_PID" ]; then ITEM_SKIPPED=1; kill "$ITEM_PID" 2>/dev/null; pkill -P "$ITEM_PID" 2>/dev/null; fi' INT
+
+  for line in "${SELECTED[@]}"; do
+    idx=$((idx+1))
+    kind="$(item_kind "$line")"; name="$(item_name "$line")"
+    if is_installed "$kind" "$name" "$line"; then
+      n_had=$((n_had+1))
+      printf '\r\033[K  %s·%s %-30s %salready installed%s\n' "$DIM" "$RESET" "$name" "$DIM" "$RESET"
+      continue
+    fi
+    new_log; start=$SECONDS; ITEM_SKIPPED=0
+    install_cmd "$kind" "$name" "$line" > "$LAST_LOG" 2>&1 < /dev/null &
+    pid=$!; ITEM_PID=$pid
+    spin_while "$pid" "$name" "$(progress_bar "$idx" "$total" 20) $idx/$total  " "$LAST_LOG"; rc=$?
+
+    # App already in /Applications (installed by hand)? Keep it as-is — adopting can hang on
+    # macOS's App Management permission prompt, and the app works fine either way.
+    local manual=0
+    if [ $ITEM_SKIPPED -eq 0 ] && [ $rc -ne 0 ] && [ "$kind" = cask ] && grep -q "already an App" "$LAST_LOG"; then
+      manual=1
+    fi
+    ITEM_PID=""
+
+    if [ $manual -eq 1 ]; then
+      n_had=$((n_had+1))
+      printf '\r\033[K  %s·%s %-30s %salready in /Applications (installed manually)%s\n' "$DIM" "$RESET" "$name" "$DIM" "$RESET"
+    elif [ $ITEM_SKIPPED -eq 1 ]; then
+      n_skip=$((n_skip+1)); SKIPPED_ITEMS+=("$name")
+      printf '\r\033[K  %s⏭%s %-30s %sskipped (Ctrl+C)%s\n' "$YELLOW" "$RESET" "$name" "$DIM" "$RESET"
+    elif [ $rc -eq 0 ]; then
+      n_new=$((n_new+1))
+      printf '\r\033[K  %s✔%s %-30s %sinstalled in %s%s\n' "$GREEN" "$RESET" "$name" "$DIM" "$(fmt_secs $((SECONDS - start)))" "$RESET"
+    else
+      n_fail=$((n_fail+1))
+      reason="$(failure_reason "$LAST_LOG")"
+      FAILED_ITEMS+=("$name|$reason|$LAST_LOG")
+      printf '\r\033[K  %s✖%s %-30s %s%s%s\n' "$RED" "$RESET" "$name" "$YELLOW" "$reason" "$RESET"
+    fi
+  done
+  rm -rf "$INSTALLED_DIR"
+  trap 'cleanup_ui; echo; warn "Stopped. Run ./setup.sh again to continue where you left off."; exit 130' INT
+
+  local lines=()
+  lines+=("$(progress_bar "$total" "$total" 30)")
+  lines+=("${GREEN}✔ $n_new installed${RESET}   ${DIM}· $n_had already installed${RESET}   $( [ $n_fail -gt 0 ] && printf '%s✖ %d failed%s' "$RED" "$n_fail" "$RESET" || printf '%s✖ 0 failed%s' "$DIM" "$RESET")$( [ $n_skip -gt 0 ] && printf '   %s⏭ %d skipped%s' "$YELLOW" "$n_skip" "$RESET")   ${DIM}⏱ $(fmt_secs $((SECONDS - t0)))${RESET}")
+  summary_box "Apps" "${lines[@]}"
+  if [ $n_fail -gt 0 ]; then
+    local fi_ fname freason flog
+    echo
+    warn "These didn't install:"
+    for fi_ in "${FAILED_ITEMS[@]}"; do
+      fname="${fi_%%|*}"; freason="${fi_#*|}"; flog="${freason#*|}"; freason="${freason%%|*}"
+      printf '    %s✖ %s%s — %s\n' "$RED" "$fname" "$RESET" "$freason"
+      note "      log: $flog"
+    done
+    note "Fix the cause (or remove the line from brew/*.Brewfile), then run: ./setup.sh apps"
+    return 1
+  fi
+  if [ $n_skip -gt 0 ]; then
+    note "Skipped: ${SKIPPED_ITEMS[*]} — run ./setup.sh apps later to install them."
+  fi
 }
 
 run_extra_installs() {
@@ -170,8 +350,8 @@ step_dotfiles() {
 step_theme() {
   header "Theme picker"
   need_brew || return 1
-  have starship || brew install starship
-  brew list --cask font-jetbrains-mono-nerd-font >/dev/null 2>&1 || brew install --cask font-jetbrains-mono-nerd-font
+  have starship || run_task "Installing Starship" brew install starship
+  brew list --cask font-jetbrains-mono-nerd-font >/dev/null 2>&1 || run_task "Installing JetBrainsMono Nerd Font" brew install --cask font-jetbrains-mono-nerd-font
 
   # Starship preset
   local presets=() p current_preset preset
@@ -179,8 +359,12 @@ step_theme() {
   current_preset="${DEFAULT_STARSHIP_PRESET:-catppuccin-powerline}"
   info "Starship prompt presets (preview: https://starship.rs/presets/)"
   preset="$(choose_one "Starship preset" "$current_preset" "${presets[@]}")"
-  starship preset "$preset" -o "$REPO_DIR/dotfiles/.config/starship.toml"
-  ok "Starship preset: $preset (saved to the repo)"
+  if starship preset "$preset" --force -o "$REPO_DIR/dotfiles/.config/starship.toml" 2>/dev/null \
+     || starship preset "$preset" > "$REPO_DIR/dotfiles/.config/starship.toml"; then
+    ok "Starship preset: $preset (saved to the repo)"
+  else
+    warn "Couldn't write the Starship preset."
+  fi
 
   # Ghostty theme
   local gbin="" themes=() t def theme cfg="$REPO_DIR/dotfiles/.config/ghostty/config" bak
@@ -296,8 +480,8 @@ CFG
 step_gpg() {
   header "GPG commit signing"
   need_brew || return 1
-  have gpg || brew install gnupg
-  have pinentry-mac || brew install pinentry-mac
+  have gpg || run_task "Installing GnuPG" brew install gnupg
+  have pinentry-mac || run_task "Installing pinentry-mac" brew install pinentry-mac
   local name email keyid conf="$HOME/.gnupg/gpg-agent.conf"
   name="$(git config --file "$HOME/.gitconfig.local" user.name 2>/dev/null || echo "$GIT_NAME")"
   email="$(git config --file "$HOME/.gitconfig.local" user.email 2>/dev/null || echo "$GIT_EMAIL")"
@@ -338,9 +522,9 @@ step_gpg() {
 step_claude() {
   header "Claude Code + usage meter"
   need_brew || return 1
-  have jq || brew install jq
+  have jq || run_task "Installing jq" brew install jq
   if ! have claude; then
-    info "Installing Claude Code…"; brew install --cask claude-code || return 1
+    run_task "Installing Claude Code" brew install --cask claude-code || return 1
   else
     ok "Claude Code is installed."
   fi
@@ -388,7 +572,7 @@ step_projects() {
     n=$((n+1))
     if [ -d "$PROJECTS_DIR/$dir/.git" ]; then ok "$dir (already cloned)"; continue; fi
     if confirm "Clone $url → $PROJECTS_DIR/$dir?" Y; then
-      git clone "$url" "$PROJECTS_DIR/$dir" && ok "Cloned $dir"
+      run_task "Cloning $dir" git clone "$url" "$PROJECTS_DIR/$dir"
     fi
   done 3< "$f"
   [ $n -eq 0 ] && note "No repos listed yet. Add them to config/repos.txt."
