@@ -1,0 +1,2 @@
+# Apps found in /Applications that Homebrew can't install.
+# Install these by hand on a new Mac (download link / App Store).

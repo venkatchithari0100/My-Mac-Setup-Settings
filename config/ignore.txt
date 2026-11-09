@@ -1,0 +1,2 @@
+# Things `setup sync` should never ask about again (one per line: "<type> <name>")
+# types: brew, cask, mas, vscode, app, cmd

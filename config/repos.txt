@@ -1,0 +1,4 @@
+# Repos to clone into PROJECTS_DIR by the "Clone my projects" step.
+# One per line:  <git url>  [folder name]
+# Example:
+# git@github.com:venkatchithari0100/some-project.git

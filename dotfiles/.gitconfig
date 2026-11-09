@@ -1,0 +1,32 @@
+# ~/.gitconfig — managed by My-Mac-Setup-Settings
+# Your name, email and GPG signing key live in ~/.gitconfig.local
+# (written by the wizard, kept out of the repo).
+
+[init]
+	defaultBranch = main
+[core]
+	excludesfile = ~/.gitignore_global
+	autocrlf = input
+[pull]
+	rebase = true
+[push]
+	autoSetupRemote = true
+[fetch]
+	prune = true
+[rebase]
+	autoStash = true
+[diff]
+	colorMoved = default
+[color]
+	ui = auto
+[alias]
+	st = status -sb
+	co = checkout
+	br = branch
+	cm = commit -m
+	lg = log --oneline --graph --decorate -20
+	undo = reset --soft HEAD~1
+
+# Keep this last so machine-specific values win
+[include]
+	path = ~/.gitconfig.local

@@ -1,0 +1,7 @@
+.DS_Store
+# Never commit keys
+*.gpg
+*.asc
+*.key
+id_*
+*.pem
