@@ -196,7 +196,7 @@ spin_while() {
     if [ -n "$log" ] && [ $((i % 5)) -eq 0 ]; then
       newsize=$(wc -c < "$log" 2>/dev/null | tr -d ' '); newsize=${newsize:-0}
       if [ "$newsize" != "$size" ]; then size=$newsize; last_change=$SECONDS; fi
-      [ $draw -eq 1 ] && last="$(tail -c 400 "$log" 2>/dev/null | tr '\r' '\n' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-$((cols - 10)))"
+      [ $draw -eq 1 ] && last="$(tail -c 400 "$log" 2>/dev/null | tr '\r' '\n' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -v '^[[:space:]]*$' | tail -1 | sed 's/.*[Ii]nstall progress cannot be displayed.*/downloading through the App Store — see progress in App Store › your profile (bottom left)/' | cut -c1-$((cols - 10)))"
     fi
     # timeouts
     if [ -n "$log" ] && [ "$STALL_TIMEOUT" -gt 0 ] && [ $((SECONDS - last_change)) -ge "$STALL_TIMEOUT" ]; then

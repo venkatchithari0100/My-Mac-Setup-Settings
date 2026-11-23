@@ -1,0 +1,18 @@
+# Global CLI tools & AI plugins — installed by the "AI tools & global packages" step.
+# One per line:  <manager> <package>
+#   npm   → npm install -g <package>
+#   uv    → uv tool install <package>      (Python CLIs)
+#   pipx  → pipx install <package>
+#   skills → npx skills add <owner/repo> -g   (agent skills for Claude Code & other AI agents)
+# `setup sync` adds new global packages it finds on this Mac (after asking).
+
+npm ui-ux-pro-max-cli
+
+# Agent skills (installed globally for all projects)
+skills nutlope/hallmark
+skills emilkowalski/skill
+
+# Security scanners (Python CLIs)
+uv checkov
+uv semgrep
+uv bandit

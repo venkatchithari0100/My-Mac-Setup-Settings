@@ -12,6 +12,8 @@ STEPS=(
   "ssh|SSH key for GitHub"
   "gpg|GPG key for signed commits"
   "claude|Claude Code + usage meter status line"
+  "ai|AI tools & global packages (npm / uv / pipx)"
+  "android|Android SDK, emulator & licences"
   "macos|macOS preferences"
   "projects|Clone my projects"
 )
@@ -150,10 +152,19 @@ install_cmd() {  # kind name line [adopt]  -> runs the install
   esac
 }
 
+# After installing Xcode: accept the license, install components, point the CLI tools at it
+xcode_post_install() {
+  [ -d /Applications/Xcode.app ] || return 0
+  sudo_keepalive
+  run_task "Xcode: selecting /Applications/Xcode.app" sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  run_task "Xcode: accepting the license" sudo xcodebuild -license accept
+  run_task "Xcode: installing components (first launch)" sudo xcodebuild -runFirstLaunch
+}
+
 # Short human reason from a brew log
 failure_reason() {
   local r
-  r="$(grep -m1 -E '^TIMEOUT:|^Error:|error:|It seems there is already|requires macOS|No available (formula|cask)|Download failed|SHA256 mismatch' "$1" 2>/dev/null | sed -E 's/^Error: //; s/^[[:space:]]+//')"
+  r="$(grep -m1 -E '^TIMEOUT:|^Error:|Not signed in|not signed in|error:|It seems there is already|requires macOS|No available (formula|cask)|Download failed|SHA256 mismatch' "$1" 2>/dev/null | sed -E 's/^Error: //; s/^[[:space:]]+//')"
   [ -z "$r" ] && r="$(grep -v '^\s*$' "$1" | tail -1)"
   printf '%s' "$r" | cut -c1-110
 }
@@ -254,9 +265,16 @@ install_selected() {
       continue
     fi
     new_log; start=$SECONDS; ITEM_SKIPPED=0
+    if [ "$kind" = mas ] && ! mas account >/dev/null 2>&1 && ! mas list >/dev/null 2>&1; then
+      warn "$name needs the App Store — open App Store, sign in, then re-run: ./setup.sh apps"
+    fi
     install_cmd "$kind" "$name" "$line" > "$LAST_LOG" 2>&1 < /dev/null &
     pid=$!; ITEM_PID=$pid
-    spin_while "$pid" "$name" "$(progress_bar "$idx" "$total" 20) $idx/$total  " "$LAST_LOG"; rc=$?
+    if [ "$kind" = mas ]; then   # App Store apps can be huge (Xcode ≈ 12 GB) and mas can't report progress: no timeouts
+      TASK_TIMEOUT=0 STALL_TIMEOUT=0 spin_while "$pid" "$name" "$(progress_bar "$idx" "$total" 20) $idx/$total  " "$LAST_LOG"; rc=$?
+    else
+      spin_while "$pid" "$name" "$(progress_bar "$idx" "$total" 20) $idx/$total  " "$LAST_LOG"; rc=$?
+    fi
 
     # App already in /Applications (installed by hand)? Keep it as-is — adopting can hang on
     # macOS's App Management permission prompt, and the app works fine either way.
@@ -275,6 +293,7 @@ install_selected() {
     elif [ $rc -eq 0 ]; then
       n_new=$((n_new+1))
       printf '\r\033[K  %s✔%s %-30s %sinstalled in %s%s\n' "$GREEN" "$RESET" "$name" "$DIM" "$(fmt_secs $((SECONDS - start)))" "$RESET"
+      [ "$name" = "Xcode" ] && xcode_post_install
     else
       n_fail=$((n_fail+1))
       reason="$(failure_reason "$LAST_LOG")"
@@ -538,6 +557,101 @@ step_claude() {
   ok "Status line enabled: model │ 5h usage │ weekly usage │ context"
   note "Run 'claude' and log in with your Pro account. The usage bars appear after your first message."
   mark_done claude
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+GLOBALS_FILE="$REPO_DIR/config/global-packages.txt"
+
+global_installed() {  # manager package
+  case "$1" in
+    npm)  have npm && npm ls -g --depth=0 "$2" >/dev/null 2>&1 ;;
+    uv)   have uv && uv tool list 2>/dev/null | grep -q "^$2 " ;;
+    pipx) have pipx && pipx list --short 2>/dev/null | grep -q "^$2 " ;;
+    skills) grep -qxF "$2" "$STATE_DIR/skills-installed" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+global_install() {  # manager package
+  case "$1" in
+    npm)  npm install -g "$2" ;;
+    uv)   uv tool install "$2" ;;
+    pipx) pipx install "$2" ;;
+    skills) npx -y skills add "$2" -g -y && { mkdir -p "$STATE_DIR"; echo "$2" >> "$STATE_DIR/skills-installed"; } ;;
+  esac
+}
+
+step_ai() {
+  header "AI tools & global packages"
+  [ -f "$GLOBALS_FILE" ] || { note "No config/global-packages.txt yet."; mark_done ai; return 0; }
+  need_brew || return 1
+  local mgr pkg n=0 n_new=0 n_had=0 n_fail=0 failed=()
+  while read -r mgr pkg _ <&3; do
+    case "$mgr" in ''|\#*) continue ;; esac
+    n=$((n+1))
+    case "$mgr" in
+      npm|skills) have npm || run_task "Installing Node.js (for npm)" brew install node ;;
+      uv)   have uv   || run_task "Installing uv" brew install uv ;;
+      pipx) have pipx || run_task "Installing pipx" brew install pipx ;;
+      *) warn "Unknown manager '$mgr' for $pkg (use npm, uv, pipx or skills)"; continue ;;
+    esac
+    if global_installed "$mgr" "$pkg"; then
+      n_had=$((n_had+1)); printf '  %s·%s %-30s %salready installed (%s)%s\n' "$DIM" "$RESET" "$pkg" "$DIM" "$mgr" "$RESET"
+    elif run_task "$pkg ($mgr)" global_install "$mgr" "$pkg"; then
+      n_new=$((n_new+1))
+    else
+      n_fail=$((n_fail+1)); failed+=("$pkg")
+    fi
+  done 3< "$GLOBALS_FILE"
+  if [ $n -eq 0 ]; then note "Nothing listed in config/global-packages.txt."; mark_done ai; return 0; fi
+  summary_box "AI tools" "${GREEN}✔ $n_new installed${RESET}   ${DIM}· $n_had already installed${RESET}   $( [ $n_fail -gt 0 ] && printf '%s✖ %d failed: %s%s' "$RED" "$n_fail" "${failed[*]}" "$RESET" || printf '%s✖ 0 failed%s' "$DIM" "$RESET")"
+  [ $n_fail -eq 0 ] && mark_done ai
+  [ $n_fail -eq 0 ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+ANDROID_SDK_ROOT_DIR="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+ANDROID_API="${ANDROID_API:-36}"
+ANDROID_AVD_NAME="${ANDROID_AVD_NAME:-dev_pixel}"
+
+android_sdkmanager() { sdkmanager --sdk_root="$ANDROID_SDK_ROOT_DIR" "$@"; }
+
+step_android() {
+  header "Android SDK, emulator & licences"
+  need_brew || return 1
+  local jh pkgs image
+  if ! jh="$(/usr/libexec/java_home -v 25 2>/dev/null)"; then
+    # Temurin is a .pkg: Homebrew's own sudo may prompt again (cached sudo isn't always reused),
+    # so run it in the foreground where the password prompt is visible, not behind the spinner.
+    info "Installing Java 25 LTS (Temurin) — enter your Mac password if asked"
+    brew install --cask temurin@25 || { err "Java 25 install failed."; return 1; }
+    jh="$(/usr/libexec/java_home -v 25)" || { err "Java 25 not found after install."; return 1; }
+  fi
+  export JAVA_HOME="$jh"; ok "Java 25: $JAVA_HOME"
+  have sdkmanager || run_task "Installing Android command-line tools" brew install --cask android-commandlinetools || return 1
+  mkdir -p "$ANDROID_SDK_ROOT_DIR"; export ANDROID_HOME="$ANDROID_SDK_ROOT_DIR"
+
+  if ! [ -d "$ANDROID_SDK_ROOT_DIR/licenses" ] || ! ls "$ANDROID_SDK_ROOT_DIR/licenses" | grep -q android-sdk-license; then
+    note "Google's Android SDK licences must be accepted to download the SDK."
+    confirm "Accept the Android SDK licences?" Y || { warn "Skipped: licences not accepted."; return 1; }
+    run_task "Accepting Android SDK licences" bash -c 'yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses' || return 1
+  else
+    ok "Android SDK licences already accepted."
+  fi
+
+  image="system-images;android-$ANDROID_API;google_apis;$( [ "$(uname -m)" = arm64 ] && echo arm64-v8a || echo x86_64 )"
+  # cmdline-tools inside the SDK: Homebrew's avdmanager only sees its own SDK folder
+  pkgs=("cmdline-tools;latest" "platform-tools" "emulator" "platforms;android-$ANDROID_API" "build-tools;$ANDROID_API.0.0" "$image")
+  run_task "Installing SDK: platform $ANDROID_API, build tools, emulator, system image (~5 GB)" android_sdkmanager "${pkgs[@]}" || return 1
+
+  if "$ANDROID_SDK_ROOT_DIR/emulator/emulator" -list-avds 2>/dev/null | grep -qx "$ANDROID_AVD_NAME"; then
+    ok "Emulator '$ANDROID_AVD_NAME' already exists."
+  else
+    run_task "Creating emulator '$ANDROID_AVD_NAME' (Pixel, API $ANDROID_API)" \
+      bash -c "echo no | '$ANDROID_SDK_ROOT_DIR/cmdline-tools/latest/bin/avdmanager' create avd -n '$ANDROID_AVD_NAME' -k '$image' -d pixel_7" || return 1
+  fi
+  note "Start it with: emulator -avd $ANDROID_AVD_NAME   (new terminals get ANDROID_HOME/JAVA_HOME from .zprofile)"
+  mark_done android
 }
 
 # ─────────────────────────────────────────────────────────────────────────

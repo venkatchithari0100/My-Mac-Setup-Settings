@@ -1,4 +1,5 @@
 # title: Developer apps & AI tools
+mas "Xcode", id: 497799835        # Apple's IDE (large ~12 GB download; sign in to the App Store first)
 cask "ghostty"                    # Fast native terminal (main)
 cask "iterm2"                     # Feature-rich terminal (backup)
 cask "claude-code"                # Claude Code AI coding agent

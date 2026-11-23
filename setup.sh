@@ -4,7 +4,7 @@
 #   ./setup.sh all        run every step in order (asks before each)
 #   ./setup.sh sync       find newly installed software and save it to this repo
 #   ./setup.sh <step>     run one step (xcode, homebrew, apps, dotfiles, theme,
-#                         git, ssh, gpg, claude, macos, projects)
+#                         git, ssh, gpg, claude, ai, android, macos, projects)
 #   add --yes to accept all defaults without asking
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

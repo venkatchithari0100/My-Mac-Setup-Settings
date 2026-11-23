@@ -156,17 +156,60 @@ sync_vscode() {
   [ $n -eq 0 ] && ok "All VS Code extensions are in the repo."
 }
 
-# ── 4. Install commands from shell history ──────────────────────────────
+# ── 4. Global npm / uv / pipx packages ─────────────────────────────────
+sync_globals() {
+  info "Checking global packages (npm -g, uv tool, pipx)…"
+  local f="$REPO_DIR/config/global-packages.txt" mgr pkg ans n=0
+  [ -f "$f" ] || printf '# <manager> <package>\n' > "$f"
+  {
+    have npm  && npm ls -g --depth=0 --json 2>/dev/null | jq -r '.dependencies // {} | keys[]' 2>/dev/null \
+      | grep -vxE 'npm|corepack|pnpm|yarn' | sed 's/^/npm /'
+    have uv   && uv tool list 2>/dev/null | awk '/^[^ -]/{print "uv " $1}'
+    have pipx && pipx list --short 2>/dev/null | awk '{print "pipx " $1}'
+  } > "$SYNC_WORK/globals"
+  while read -r mgr pkg <&3; do
+    [ -z "$pkg" ] && continue
+    grep -qE "^${mgr}[[:space:]]+${pkg}([[:space:]]|\$)" "$f" && continue
+    is_known "$mgr" "$pkg" && continue
+    n=$((n+1))
+    printf '\n%s+ New global package:%s %s %s(%s)%s\n' "$GREEN$BOLD" "$RESET" "$pkg" "$DIM" "$mgr" "$RESET"
+    printf '%s?%s Save to config/global-packages.txt? [y]es / [i]gnore forever / [s]kip: ' "$CYAN" "$RESET"
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      y|Y) echo "$mgr $pkg" >> "$f"; ok "Saved."; SYNC_CHANGES=$((SYNC_CHANGES+1)) ;;
+      i|I) ignore_entry "$mgr" "$pkg" ;;
+    esac
+  done 3< "$SYNC_WORK/globals"
+  [ $n -eq 0 ] && ok "All global packages are in the repo."
+}
+
+# ── 5. Install commands from shell history ──────────────────────────────
 sync_history() {
-  info "Scanning shell history for other install commands (npm -g, pipx, uv tool, cargo, curl | sh)…"
+  info "Scanning shell history for agent skills and other installs (npx skills, cargo, go, gem, curl | sh)…"
   local extra="$REPO_DIR/config/extra-installs.sh" cmd ans n=0
   { [ -f "$HOME/.zsh_history" ] && LC_ALL=C sed -E 's/^: [0-9]+:[0-9]+;//' "$HOME/.zsh_history"
     [ -f "$HOME/.bash_history" ] && cat "$HOME/.bash_history"; } 2>/dev/null \
-    | LC_ALL=C grep -E '(npm (i|install|add) (-g|--global)|pnpm (add|install) -g|yarn global add|pipx install|uv tool install|cargo install|go install|gem install|curl [^|]*\| *(ba|z)?sh)' \
-    | LC_ALL=C grep -vE '(brew|setup) ' \
+    | LC_ALL=C grep -E '(npx (-y )?skills add |npm (i|install|add) (-g|--global)|pnpm (add|install) -g|yarn global add|pipx install|uv tool install|cargo install|go install|gem install|curl [^|]*\| *(ba|z)?sh)' \
+    | LC_ALL=C grep -vE '(brew|setup) |npm (i|install|add) (-g|--global)|uv tool install|pipx install' \
     | sed -E 's/[[:space:]]+$//' | awk '!seen[$0]++' > "$SYNC_WORK/hist"
 
+  local gfile="$REPO_DIR/config/global-packages.txt" repo
   while IFS= read -r cmd <&3; do
+    # npx skills add <repo> → save as a "skills" entry in global-packages.txt
+    repo="$(printf '%s' "$cmd" | sed -nE 's/.*npx (-y )?skills add ([^ ]+).*/\2/p')"
+    if [ -n "$repo" ]; then
+      grep -qE "^skills[[:space:]]+${repo}\$" "$gfile" 2>/dev/null && continue
+      grep -qxF "skills $repo" "$REPO_DIR/config/ignore.txt" 2>/dev/null && continue
+      n=$((n+1))
+      printf '\n%s+ Agent skill from history:%s %s\n' "$GREEN$BOLD" "$RESET" "$repo"
+      printf '%s?%s Save to config/global-packages.txt? [y]es / [i]gnore forever / [s]kip: ' "$CYAN" "$RESET"
+      IFS= read -r ans || ans=""
+      case "$ans" in
+        y|Y) echo "skills $repo" >> "$gfile"; ok "Saved."; SYNC_CHANGES=$((SYNC_CHANGES+1)) ;;
+        i|I) ignore_entry skills "$repo" ;;
+      esac
+      continue
+    fi
     grep -qxF "$cmd" "$extra" 2>/dev/null && continue
     grep -qxF "cmd $cmd" "$REPO_DIR/config/ignore.txt" 2>/dev/null && continue
     n=$((n+1))
@@ -181,7 +224,7 @@ sync_history() {
   [ $n -eq 0 ] && ok "No new install commands in history."
 }
 
-# ── 5. Untracked dotfiles hint ──────────────────────────────────────────
+# ── 6. Untracked dotfiles hint ──────────────────────────────────────────
 sync_dotfiles_hint() {
   local f
   for f in .zshrc .zprofile .gitconfig; do
@@ -219,6 +262,7 @@ run_sync() {
   sync_brew
   sync_apps
   sync_vscode
+  sync_globals
   sync_history
   sync_dotfiles_hint
   rm -rf "$SYNC_WORK"

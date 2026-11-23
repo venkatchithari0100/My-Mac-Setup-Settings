@@ -8,6 +8,7 @@ $username\
 $directory\
 [](bg:yellow fg:peach)\
 $git_branch\
+$git_state\
 $git_status\
 [](fg:yellow bg:green)\
 $c\
@@ -26,6 +27,7 @@ $conda\
 $time\
 [ ](fg:lavender)\
 $cmd_duration\
+$status\
 $line_break\
 $character"""
 
@@ -83,9 +85,33 @@ symbol = ""
 style = "bg:yellow"
 format = '[[ $symbol $branch ](fg:crust bg:yellow)]($style)'
 
+# Shows counts:  !3 modified · +2 staged · ?1 untracked · ✘1 deleted · »1 renamed
+#                ≡1 stashed · =1 conflicts · ⇡2 to push · ⇣1 to pull
 [git_status]
 style = "bg:yellow"
-format = '[[($all_status$ahead_behind )](fg:crust bg:yellow)]($style)'
+format = '[[($conflicted$staged$modified$renamed$deleted$untracked$stashed$ahead_behind)](bold fg:red bg:yellow)]($style)'
+conflicted = "=${count} "
+staged = "+${count} "
+modified = "!${count} "
+renamed = "»${count} "
+deleted = "✘${count} "
+untracked = "?${count} "
+stashed = "≡${count} "
+ahead = "⇡${count} "
+behind = "⇣${count} "
+diverged = "⇡${ahead_count}⇣${behind_count} "
+up_to_date = "✓ "
+
+# Shows REBASING 2/5, MERGING, CHERRY-PICKING… while a git operation is in progress
+[git_state]
+style = "bg:yellow"
+format = '[[ $state( $progress_current/$progress_total) ](bold fg:red bg:yellow)]($style)'
+
+# Last command failed? Show its exit code after the prompt segments
+[status]
+disabled = false
+format = '[ ✘ $status ]($style)'
+style = "bold fg:red"
 
 [nodejs]
 symbol = ""
