@@ -202,9 +202,11 @@ vimcmd_replace_symbol = '[❮](bold fg:lavender)'
 vimcmd_visual_symbol = '[❮](bold fg:yellow)'
 
 [cmd_duration]
-show_milliseconds = true
-format = " in $duration "
-style = "bg:lavender"
+# Shown only when the last command ran for 2 seconds or more, e.g. "⏱ took 13s".
+min_time = 2_000
+show_milliseconds = false
+format = '[⏱ took $duration ]($style)'
+style = "bold fg:peach"
 disabled = false
 show_notifications = true
 min_time_to_notify = 45000
